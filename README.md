@@ -135,7 +135,7 @@ if __name__ == '__main__':
 Note: In both cases, the methods that process the data need to return the data back to the proxy handler. Otherwise,
 you'll get an exception.
 
-##Kudos
+## Kudos
 
 Thanks to the great documentation at python.org, GnuCitizen's PDP for the ideas, the pyOpenSSL group for making a great
 OpenSSL API.
