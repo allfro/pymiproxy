@@ -75,6 +75,7 @@ another.
 The following is a simple code example of how to run the proxy with plugins:
 
 ```python
+from sys import argv
 from miproxy.proxy import RequestInterceptorPlugin, ResponseInterceptorPlugin, AsyncMitmProxy
 
 class DebugInterceptor(RequestInterceptorPlugin, ResponseInterceptorPlugin):
@@ -107,7 +108,8 @@ The alternate approach to extending the proxy functionality is to subclass the P
 ```mitm_request``` and ```mitm_response``` methods. The following is a quick example:
 
 ```python
-from miproxy.proxy import AsyncMitmProxy
+from sys import argv
+from miproxy.proxy import AsyncMitmProxy, ProxyHandler
 
 class MitmProxyHandler(ProxyHandler):
 
