@@ -15,6 +15,8 @@ from OpenSSL.crypto import (X509Extension, X509, dump_privatekey, dump_certifica
                             PKey, TYPE_RSA, X509Req)
 from OpenSSL.SSL import FILETYPE_PEM
 
+import zlib, gzip, StringIO
+
 __author__ = 'Nadeem Douba'
 __copyright__ = 'Copyright 2012, PyMiProxy Project'
 __credits__ = ['Nadeem Douba']
@@ -35,6 +37,13 @@ __all__ = [
     'InvalidInterceptorPluginException'
 ]
 
+class HttpMsg(object):
+    def __init__(self, headline='', content=''):
+        self.headline = headline
+        self.headers = dict()
+        self.content = content
+    def add_header(self, k, v):
+        self.headers[k] = v
 
 class CertificateAuthority(object):
 
@@ -202,17 +211,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Extract path
 
         # Build request
-        req = '%s %s %s\r\n' % (self.command, self.path, self.request_version)
-
-        # Add headers to the request
-        req += '%s\r\n' % self.headers
+        headline = '%s %s %s' % (self.command, self.path, self.request_version)
 
         # Append message body if present to the request
+        content = ''
         if 'Content-Length' in self.headers:
-            req += self.rfile.read(int(self.headers['Content-Length']))
+            content = self.rfile.read(int(self.headers['Content-Length']))
 
+        # Add headers to the request
+        req_msg = HttpMsg(headline, content)
+        for k in self.headers:
+            req_msg.add_header(k, self.headers[k])
         # Send it down the pipe!
-        self._proxy_sock.sendall(self.mitm_request(req))
+        self._proxy_sock.sendall(self.mitm_request(req_msg))
 
         # Parse response
         h = HTTPResponse(self._proxy_sock)
@@ -222,25 +233,40 @@ class ProxyHandler(BaseHTTPRequestHandler):
         del h.msg['Transfer-Encoding']
 
         # Time to relay the message across
-        res = '%s %s %s\r\n' % (self.request_version, h.status, h.reason)
-        res += '%s\r\n' % h.msg
-        res += h.read()
+        headline = '%s %s %s' % (self.request_version, h.status, h.reason)
+        rsp_msg = HttpMsg(headline, h.read())
+        for tup in h.getheaders():
+            k, v = tup
+            rsp_msg.add_header(k, v)
 
         # Let's close off the remote end
         h.close()
         self._proxy_sock.close()
 
         # Relay the message
-        self.request.sendall(self.mitm_response(res))
+        self.request.sendall(self.mitm_response(rsp_msg))
 
-    def mitm_request(self, data):
+    def mitm_request(self, msg):
         for p in self.server._req_plugins:
-            data = p(self.server, self).do_request(data)
-        return data
+            data = p(self.server, self).do_request(msg)
 
-    def mitm_response(self, data):
+        result = msg.headline + '\r\n'
+        for k in msg.headers:
+            result += '%s: %s\r\n' %(k, msg.headers[k])
+        result += '\r\n'
+        result += msg.content
+        return result
+
+    def mitm_response(self, msg):
         for p in self.server._res_plugins:
-            data = p(self.server, self).do_response(data)
+            data = p(self.server, self).do_response(msg)
+        result = msg.headline + '\r\n'
+        for k in msg.headers:
+            result += '%s: %s\r\n' %(k, msg.headers[k])
+        result += '\r\n'
+        result += msg.content
+        return result
+        
         return data
 
     def __getattr__(self, item):
@@ -305,13 +331,24 @@ class MitmProxyHandler(ProxyHandler):
 
 class DebugInterceptor(RequestInterceptorPlugin, ResponseInterceptorPlugin):
 
-        def do_request(self, data):
-            print '>> %s' % repr(data[:100])
-            return data
+        def do_request(self, msg):
+            print msg.headline
+            print msg.headers
+            return msg
 
-        def do_response(self, data):
-            print '<< %s' % repr(data[:100])
-            return data
+        def do_response(self, msg):
+            print msg.headline
+            print msg.headers
+
+            compress_method = ''
+            if "content-encoding" in msg.headers:
+                compress_method = msg.headers["content-encoding"] 
+            if compress_method.find('gzip') != -1:
+                print gzip.GzipFile(fileobj = StringIO.StringIO(msg.content)).read()
+            elif compress_method.find('deflate') != -1:
+                print zlib.decompress(msg.content)
+
+            return msg
 
 
 if __name__ == '__main__':
