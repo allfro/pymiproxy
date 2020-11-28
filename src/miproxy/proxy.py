@@ -1,9 +1,17 @@
 #!/usr/bin/env python
 
-from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
-from urlparse import urlparse, urlunparse, ParseResult
-from SocketServer import ThreadingMixIn
-from httplib import HTTPResponse
+try:
+    from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
+    from urlparse import urlparse, urlunparse, ParseResult
+    from SocketServer import ThreadingMixIn
+    from httplib import HTTPResponse
+except ImportError:
+    # Python3 imports
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from socketserver import ThreadingMixIn
+    from urllib.parse import urlparse, urlunparse, ParseResult
+    from http.client import HTTPResponse
+
 from tempfile import gettempdir
 from os import path, listdir
 from ssl import wrap_socket
@@ -15,6 +23,7 @@ from OpenSSL.crypto import (X509Extension, X509, dump_privatekey, dump_certifica
                             PKey, TYPE_RSA, X509Req)
 from OpenSSL.SSL import FILETYPE_PEM
 
+# Original author
 __author__ = 'Nadeem Douba'
 __copyright__ = 'Copyright 2012, PyMiProxy Project'
 __credits__ = ['Nadeem Douba']
@@ -71,10 +80,11 @@ class CertificateAuthority(object):
         self.cert.gmtime_adj_notAfter(315360000)
         self.cert.set_issuer(self.cert.get_subject())
         self.cert.set_pubkey(self.key)
+
         self.cert.add_extensions([
-            X509Extension("basicConstraints", True, "CA:TRUE, pathlen:0"),
-            X509Extension("keyUsage", True, "keyCertSign, cRLSign"),
-            X509Extension("subjectKeyIdentifier", False, "hash", subject=self.cert),
+            X509Extension(b"basicConstraints", True, b"CA:TRUE, pathlen:0"),
+            X509Extension(b"keyUsage", True, b"keyCertSign, cRLSign"),
+            X509Extension(b"subjectKeyIdentifier", False, b"hash", subject=self.cert),
             ])
         self.cert.sign(self.key, "sha1")
 
@@ -83,8 +93,8 @@ class CertificateAuthority(object):
             f.write(dump_certificate(FILETYPE_PEM, self.cert))
 
     def _read_ca(self, file):
-        self.cert = load_certificate(FILETYPE_PEM, open(file).read())
-        self.key = load_privatekey(FILETYPE_PEM, open(file).read())
+        self.cert = load_certificate(FILETYPE_PEM, open(file, "rb").read())
+        self.key = load_privatekey(FILETYPE_PEM, open(file, "rb").read())
 
     def __getitem__(self, cn):
         cnp = path.sep.join([self.cache_dir, '.pymp_%s.pem' % cn])
@@ -131,6 +141,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def __init__(self, request, client_address, server):
         self.is_connect = False
+        self._headers_buffer = []
         BaseHTTPRequestHandler.__init__(self, request, client_address, server)
 
     def _connect_to_host(self):
@@ -163,23 +174,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if self.is_connect:
             self._proxy_sock = wrap_socket(self._proxy_sock)
 
-
     def _transition_to_ssl(self):
         self.request = wrap_socket(self.request, server_side=True, certfile=self.server.ca[self.path.split(':')[0]])
-
 
     def do_CONNECT(self):
         self.is_connect = True
         try:
             # Connect to destination first
             self._connect_to_host()
-
             # If successful, let's do this!
-            self.send_response(200, 'Connection established')
+            self.send_response(200, "connection established")
             self.end_headers()
             #self.request.sendall('%s 200 Connection established\r\n\r\n' % self.request_version)
             self._transition_to_ssl()
-        except Exception, e:
+        except Exception as e:
             self.send_error(500, str(e))
             return
 
@@ -196,23 +204,32 @@ class ProxyHandler(BaseHTTPRequestHandler):
             try:
                 # Connect to destination
                 self._connect_to_host()
-            except Exception, e:
+            except Exception as e:
                 self.send_error(500, str(e))
                 return
             # Extract path
 
         # Build request
         req = '%s %s %s\r\n' % (self.command, self.path, self.request_version)
-
         # Add headers to the request
-        req += '%s\r\n' % self.headers
+        for h in self.headers:
+            if h.lower() == "accept-encoding":
+                req += '%s:identity\r\n' % h
+            else:
+                req += '%s:%s\r\n' % (h, self.headers[h])
 
         # Append message body if present to the request
         if 'Content-Length' in self.headers:
-            req += self.rfile.read(int(self.headers['Content-Length']))
+            req += self.rfile.read(int(self.headers['Content-Length'])).decode()
 
         # Send it down the pipe!
-        self._proxy_sock.sendall(self.mitm_request(req))
+        proxyreq = self.mitm_request(req).encode()
+        if not proxyreq.endswith(b'\r\n\r\n\r\n'):
+            if not proxyreq.endswith(b'\r\n'):
+                proxyreq = proxyreq + b"\r\n\r\n\r\n"
+            else:
+                proxyreq = proxyreq + b"\r\n\r\n"
+        self._proxy_sock.sendall(proxyreq)
 
         # Parse response
         h = HTTPResponse(self._proxy_sock)
@@ -224,14 +241,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # Time to relay the message across
         res = '%s %s %s\r\n' % (self.request_version, h.status, h.reason)
         res += '%s\r\n' % h.msg
-        res += h.read()
+        body = h.read()
+        res += body.decode(encoding="utf-8", errors="ignore")
 
         # Let's close off the remote end
         h.close()
         self._proxy_sock.close()
 
         # Relay the message
-        self.request.sendall(self.mitm_response(res))
+        relay = self.mitm_response(res).encode("utf-8")
+        self.request.sendall(relay)
 
     def mitm_request(self, data):
         for p in self.server._req_plugins:
@@ -295,22 +314,22 @@ class AsyncMitmProxy(ThreadingMixIn, MitmProxy):
 class MitmProxyHandler(ProxyHandler):
 
     def mitm_request(self, data):
-        print '>> %s' % repr(data[:100])
+        print('>> %s' % repr(data[:100]))
         return data
 
     def mitm_response(self, data):
-        print '<< %s' % repr(data[:100])
+        print('<< %s' % repr(data[:100]))
         return data
 
 
 class DebugInterceptor(RequestInterceptorPlugin, ResponseInterceptorPlugin):
 
         def do_request(self, data):
-            print '>> %s' % repr(data[:100])
+            print('>> %s' % repr(data[:100]))
             return data
 
         def do_response(self, data):
-            print '<< %s' % repr(data[:100])
+            print('<< %s' % repr(data[:100]))
             return data
 
 
@@ -325,4 +344,3 @@ if __name__ == '__main__':
         proxy.serve_forever()
     except KeyboardInterrupt:
         proxy.server_close()
-
